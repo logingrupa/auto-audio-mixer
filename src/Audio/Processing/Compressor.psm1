@@ -1,5 +1,7 @@
 # /src/Audio/Processing/Compressor.psm1
-function Invoke-AudioCompression {
+using namespace System.Management.Automation
+
+function global:Invoke-AudioCompression {
     [CmdletBinding()]
     [OutputType([string])]
     param (
@@ -24,12 +26,8 @@ function Invoke-AudioCompression {
             $extension = [System.IO.Path]::GetExtension($InputPath)
             $outputPath = Join-Path $directory ($filename + "_automixd" + $extension)
 
-            if (Test-Path $outputPath) {
-                Write-Verbose "Removing existing output file: $outputPath"
-                Remove-Item -Path $outputPath -Force
-            }
-
             $ffmpegArgs = @(
+                "-y",  # Overwrite output files without asking
                 "-i", $InputPath,
                 "-af", "acompressor=threshold=${Threshold}dB:ratio=20:attack=5:release=200",
                 $outputPath
@@ -50,4 +48,5 @@ function Invoke-AudioCompression {
     }
 }
 
+# Explicitly export the function
 Export-ModuleMember -Function Invoke-AudioCompression

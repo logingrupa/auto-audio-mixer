@@ -1,21 +1,31 @@
-# Optimized version of auto-audio-mixer-v2.psm1
+# Main module script
 using namespace System.Management.Automation
 
-# Import required functions at module scope
-$modulePath = Split-Path -Parent $MyInvocation.MyCommand.Path
-@(
-    'src/Core/Types/AudioTypes.psm1',
-    'src/Core/Utils/ErrorHandling.psm1',
-    'src/Audio/Analysis/VolumeAnalyzer.psm1',
-    'src/IO/MetadataManager.psm1',
-    'src/Audio/Processing/Compressor.psm1'
-) | ForEach-Object {
-    $fullPath = Join-Path $modulePath $_
-    if (Test-Path $fullPath) {
-        Import-Module $fullPath -Force
+# Determine the module's root directory
+$ModuleRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+
+# List of modules to import with full paths
+$ModulesToImport = @(
+    "$ModuleRoot\src\Core\Types\AudioTypes.psm1",
+    "$ModuleRoot\src\Core\Utils\ErrorHandling.psm1",
+    "$ModuleRoot\src\Audio\Analysis\VolumeAnalyzer.psm1",
+    "$ModuleRoot\src\IO\MetadataManager.psm1",
+    "$ModuleRoot\src\Audio\Processing\Compressor.psm1"
+)
+
+# Import required modules with error handling
+foreach ($modulePath in $ModulesToImport) {
+    if (Test-Path $modulePath) {
+        try {
+            Import-Module $modulePath -Force -Global -ErrorAction Stop
+            Write-Verbose "Successfully imported module: $modulePath"
+        }
+        catch {
+            Write-Error "Failed to import module $modulePath. Error: $_"
+        }
     }
     else {
-        Write-Warning "Module not found: $_"
+        Write-Error "Module file not found: $modulePath"
     }
 }
 
@@ -50,82 +60,126 @@ function Invoke-AudioProcessing {
 
         # Get .wav files
         $wavFiles = Get-ChildItem -Path $FolderPath -Filter "*.wav" | 
-            Where-Object { ($_.Name -match "Pastor_|Radio1_") -and ($_.Name -notmatch "_automix") }
+            Where-Object { ($_.Name -match "Pastor_|Radio1_") -and ($_.Name -notmatch "_automixd") }
 
         if (-not $wavFiles) {
             Write-Warning "No matching .wav files found."
             return
         }
-
+        
         # Create initial metadata path
-        $timestamp = Get-Date -Format 'yyyyMMddHHmmss'
-        $metadataPath = Join-Path $FolderPath "metadata_$timestamp.json"
-
+        $timestamp = Get-Date -Format 'yyyy-MM-dd'
+        $metadataPath = Join-Path $FolderPath "metadata.json"
+        
         # Process files in parallel and collect results
         $results = $wavFiles | ForEach-Object -ThrottleLimit $ThrottleLimit -Parallel {
-            $file = $_
-            $filePath = $file.FullName
-            $fileName = $file.Name
-            
-            try {
-                Write-Host "Processing file: $fileName" -ForegroundColor Cyan
-                
-                # Load required functions in parallel scope
-                $moduleFunctions = {
-                    function Get-AudioVolumeStats {
-                        param ([string]$FilePath)
-                        $volumeLog = [System.IO.Path]::ChangeExtension($FilePath, ".volumedetect.log")
-                        try {
-                            $ffmpegOutput = & ffmpeg -i $FilePath -af "volumedetect" -f null NUL 2>&1
-                            $null = $ffmpegOutput | Out-File -FilePath $volumeLog -Encoding utf8
-                            
-                            $meanVolume = [double](Select-String -Path $volumeLog -Pattern "mean_volume: (-?\d+\.?\d*) dB" | 
-                                ForEach-Object { $_.Matches.Groups[1].Value })
-                            $maxVolume = [double](Select-String -Path $volumeLog -Pattern "max_volume: (-?\d+\.?\d*) dB" | 
-                                ForEach-Object { $_.Matches.Groups[1].Value })
-                            
-                            return @{
-                                MeanVolume = $meanVolume
-                                MaxVolume = $maxVolume
-                                MinVolume = -100.0  # Default value
-                                FixMeanVolume = [Math]::Min($meanVolume + 27.4, 0.0)
-                                RequiresCompression = ($maxVolume - (-100.0)) -gt 40.0 -or $meanVolume -lt -24.0
-                            }
+            # Store the module root from the parent scope
+            $ModuleRoot = $using:ModuleRoot
+
+            # Define functions inline to ensure availability
+            function Get-AudioVolumeStats {
+                [CmdletBinding()]
+                [OutputType([hashtable])]
+                param (
+                    [Parameter(Mandatory = $true)]
+                    [ValidateNotNullOrEmpty()]
+                    [ValidateScript({ Test-Path $_ -PathType Leaf })]
+                    [string]$FilePath
+                )
+
+                begin {
+                    Write-Verbose "Analyzing volume for file: $FilePath"
+                }
+
+                process {
+                    $volumeLog = [System.IO.Path]::ChangeExtension($FilePath, ".volumedetect.log")
+                    try {
+                        # Run FFmpeg volume detection
+                        $ffmpegOutput = & ffmpeg -i $FilePath -af "volumedetect" -f null NUL 2>&1
+                        $null = $ffmpegOutput | Out-File -FilePath $volumeLog -Encoding utf8
+
+                        # Extract mean and max volume from log
+                        $meanVolume = [double](Select-String -Path $volumeLog -Pattern "mean_volume: (-?\d+\.?\d*) dB" | 
+                            ForEach-Object { $_.Matches.Groups[1].Value })
+                        $maxVolume = [double](Select-String -Path $volumeLog -Pattern "max_volume: (-?\d+\.?\d*) dB" | 
+                            ForEach-Object { $_.Matches.Groups[1].Value })
+
+                        # Construct return object
+                        $volumeStats = @{
+                            MeanVolume = $meanVolume
+                            MaxVolume = $maxVolume
+                            MinVolume = -100.0  # Default value
+                            FixMeanVolume = [Math]::Min($meanVolume + 27.4, 0.0)
+                            RequiresCompression = ($maxVolume - (-100.0)) -gt 40.0 -or $meanVolume -lt -24.0
                         }
-                        finally {
-                            if (Test-Path $volumeLog) {
-                                Remove-Item -Path $volumeLog -Force
-                            }
+
+                        return $volumeStats
+                    }
+                    catch {
+                        Write-Error "Error analyzing volume: $_"
+                        return $null
+                    }
+                    finally {
+                        if (Test-Path $volumeLog) {
+                            Remove-Item -Path $volumeLog -Force
                         }
                     }
+                }
+            }
 
-                    function Invoke-AudioCompression {
-                        param (
-                            [string]$InputPath,
-                            [double]$Threshold
-                        )
-                        
+            function Invoke-AudioCompression {
+                [CmdletBinding()]
+                [OutputType([string])]
+                param (
+                    [Parameter(Mandatory = $true)]
+                    [ValidateNotNullOrEmpty()]
+                    [ValidateScript({ Test-Path $_ -PathType Leaf })]
+                    [string]$InputPath,
+
+                    [Parameter(Mandatory = $true)]
+                    [ValidateRange(-100, 0)]
+                    [double]$Threshold
+                )
+
+                begin {
+                    Write-Verbose "Starting audio compression for: $InputPath"
+                }
+
+                process {
+                    try {
                         $directory = [System.IO.Path]::GetDirectoryName($InputPath)
                         $filename = [System.IO.Path]::GetFileNameWithoutExtension($InputPath)
                         $extension = [System.IO.Path]::GetExtension($InputPath)
-                        $timestamp = Get-Date -Format 'yyyyMMddHHmmss'
-                        $outputPath = Join-Path $directory ($filename + "_automixd_$timestamp" + $extension)
+                        $outputPath = Join-Path $directory ($filename + "_automixd" + $extension)
 
                         $ffmpegArgs = @(
+                            "-y",  # Overwrite output files without asking
                             "-i", $InputPath,
                             "-af", "acompressor=threshold=${Threshold}dB:ratio=20:attack=5:release=200",
                             $outputPath
                         )
 
                         $result = & ffmpeg $ffmpegArgs 2>&1
-                        if ($LASTEXITCODE -eq 0) {
-                            return $outputPath
+                        if ($LASTEXITCODE -ne 0) {
+                            throw "FFmpeg compression failed with exit code: $LASTEXITCODE"
                         }
+
+                        Write-Verbose "Audio compression successful. Output: $outputPath"
+                        return $outputPath
+                    }
+                    catch {
+                        Write-Error "Error applying compression: $_"
                         return $null
                     }
-                }.ToString()
+                }
+            }
 
-                Invoke-Expression $moduleFunctions
+            $file = $_
+            $filePath = $file.FullName
+            $fileName = $file.Name
+            
+            try {
+                Write-Host "Processing file: $fileName" -ForegroundColor Cyan
                 
                 # Analyze volume
                 $volumeStats = Get-AudioVolumeStats -FilePath $filePath
@@ -212,5 +266,6 @@ function Invoke-AudioProcessing {
     }
 }
 
-# Export only the main function
+# Export only the main function and add a verbose import confirmation
 Export-ModuleMember -Function Invoke-AudioProcessing
+Write-Verbose "Auto Audio Mixer v2 module imported successfully."

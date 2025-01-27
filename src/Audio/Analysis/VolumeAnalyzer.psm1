@@ -2,11 +2,9 @@
 using namespace System.Management.Automation
 using namespace System.IO
 
-# Dependencies: AudioTypes.psm1 (AudioVolumeStats)
-
-function Get-AudioVolumeStats {
+function global:Get-AudioVolumeStats {
     [CmdletBinding()]
-    [OutputType([AudioVolumeStats])]
+    [OutputType([hashtable])]
     param (
         [Parameter(Mandatory = $true)]
         [ValidateNotNullOrEmpty()]
@@ -31,7 +29,16 @@ function Get-AudioVolumeStats {
             $maxVolume = [double](Select-String -Path $volumeLog -Pattern "max_volume: (-?\d+\.?\d*) dB" | 
                 ForEach-Object { $_.Matches.Groups[1].Value })
 
-            return [AudioVolumeStats]::new($meanVolume, $maxVolume, -100.0)  # Min volume defaulted
+            # Construct return object
+            $volumeStats = @{
+                MeanVolume = $meanVolume
+                MaxVolume = $maxVolume
+                MinVolume = -100.0  # Default value
+                FixMeanVolume = [Math]::Min($meanVolume + 27.4, 0.0)
+                RequiresCompression = ($maxVolume - (-100.0)) -gt 40.0 -or $meanVolume -lt -24.0
+            }
+
+            return $volumeStats
         }
         catch {
             Write-Error "Error analyzing volume: $_"
@@ -45,4 +52,5 @@ function Get-AudioVolumeStats {
     }
 }
 
+# Export the function
 Export-ModuleMember -Function Get-AudioVolumeStats
