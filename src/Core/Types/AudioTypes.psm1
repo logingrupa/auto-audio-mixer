@@ -114,8 +114,6 @@ class AudioFileMetadata {
         return [AudioFileType]::Unknown
     }
 
-
-
     # Update volume stats
     [void]UpdateVolumeStats([AudioVolumeStats]$stats) {
         $this.VolumeStats = $stats
@@ -141,7 +139,6 @@ class AudioFileMetadata {
             AdditionalMetadata = $this.AdditionalMetadata.Clone()
         }
     }
-
 }
 
 # Export public types

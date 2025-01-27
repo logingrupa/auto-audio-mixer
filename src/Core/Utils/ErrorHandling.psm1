@@ -1,4 +1,76 @@
+# /src/Core/Utils/ErrorHandling.psm1
 using namespace System.Management.Automation
+
+function Test-FFmpegAvailable {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param()
+
+    begin {
+        Write-Verbose "Checking FFmpeg availability"
+    }
+
+    process {
+        try {
+            # Try to get FFmpeg version info
+            $ffmpegVersion = & ffmpeg -version
+            if ($LASTEXITCODE -eq 0 -and $ffmpegVersion) {
+                Write-Verbose "FFmpeg found and working"
+                return $true
+            }
+            Write-Warning "FFmpeg command executed but returned unexpected results"
+            return $false
+        }
+        catch {
+            Write-Warning "FFmpeg not found or not accessible: $_"
+            return $false
+        }
+    }
+}
+
+function Test-FFmpegCapabilities {
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param()
+
+    process {
+        $capabilities = @{
+            HasFFmpeg = $false
+            HasVolumeDetect = $false
+            HasCompressor = $false
+            Version = $null
+        }
+
+        try {
+            # Check basic FFmpeg availability
+            $versionOutput = & ffmpeg -version 2>&1
+            if ($LASTEXITCODE -eq 0) {
+                $capabilities.HasFFmpeg = $true
+                
+                # Extract version
+                if ($versionOutput -match 'ffmpeg version (\S+)') {
+                    $capabilities.Version = $matches[1]
+                }
+
+                # Check for volume detection capability
+                $filterOutput = & ffmpeg -filters 2>&1
+                if ($filterOutput -match 'volumedetect') {
+                    $capabilities.HasVolumeDetect = $true
+                }
+
+                # Check for compressor capability
+                if ($filterOutput -match 'acompressor') {
+                    $capabilities.HasCompressor = $true
+                }
+            }
+        }
+        catch {
+            Write-Warning "Error checking FFmpeg capabilities: $_"
+        }
+
+        return $capabilities
+    }
+}
 
 # Custom error types
 class AudioProcessingError : Exception {
@@ -43,22 +115,21 @@ function Write-ErrorLog {
             $stack = $Exception.StackTrace
 
             # Format error details
-            $errorDetails = @"
-[$timestamp] $errorType
-Message: $message
-StackTrace: $stack
-"@
+            $errorLog = @{
+                Timestamp = $timestamp
+                ErrorType = $errorType
+                Message = $message
+                StackTrace = $stack
+            }
 
             # Add additional info for custom error types
             if ($Exception -is [AudioProcessingError]) {
-                $errorDetails += @"
-
-Operation: $($Exception.Operation)
-FilePath: $($Exception.FilePath)
-"@
+                $errorLog.Operation = $Exception.Operation
+                $errorLog.FilePath = $Exception.FilePath
             }
 
-            $errorDetails += "`n" + "="*50 + "`n"
+            # Convert to JSON for structured logging
+            $jsonError = $errorLog | ConvertTo-Json
 
             # Ensure directory exists
             $logDir = Split-Path -Parent $LogPath
@@ -67,7 +138,7 @@ FilePath: $($Exception.FilePath)
             }
 
             # Append to log file
-            Add-Content -Path $LogPath -Value $errorDetails
+            Add-Content -Path $LogPath -Value $jsonError
 
             # Write to error stream
             Write-Error -Exception $Exception -ErrorAction Continue
@@ -82,24 +153,6 @@ FilePath: $($Exception.FilePath)
             if ($PassThru) {
                 return $Exception
             }
-        }
-    }
-}
-
-function Test-FFmpegAvailable {
-    [CmdletBinding()]
-    [OutputType([bool])]
-    param()
-
-    process {
-        try {
-            $null = Get-Command ffmpeg -ErrorAction Stop
-            $null = Get-Command ffprobe -ErrorAction Stop
-            return $true
-        }
-        catch {
-            Write-Error "FFmpeg tools not found. Please ensure ffmpeg and ffprobe are installed and in PATH."
-            return $false
         }
     }
 }
@@ -150,7 +203,8 @@ function Invoke-WithErrorHandling {
 
 # Export public functions
 Export-ModuleMember -Function @(
-    'Write-ErrorLog',
     'Test-FFmpegAvailable',
+    'Test-FFmpegCapabilities',
+    'Write-ErrorLog',
     'Invoke-WithErrorHandling'
 )
